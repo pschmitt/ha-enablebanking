@@ -49,6 +49,7 @@ BALANCE_SENSOR = EnableBankingSensorDescription(
         "currency": acc.currency,
         "balance_type": acc.balance_type,
         "reference_date": acc.reference_date,
+        "transactions": acc.transactions,
     },
 )
 
@@ -106,6 +107,7 @@ class EnableBankingBalanceSensor(EnableBankingEntity, SensorEntity):
 
     entity_description: EnableBankingSensorDescription
     coordinator: EnableBankingCoordinator
+    _unrecorded_attributes = frozenset({"transactions"})
 
     @property
     def name(self) -> str | None:

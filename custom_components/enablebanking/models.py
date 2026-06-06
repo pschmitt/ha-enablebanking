@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class AccountBalance:
     balance: float
     balance_type: str | None
     reference_date: str | None
+    transactions: list[dict[str, Any]] = field(default_factory=list)
     last_polled_at: datetime | None = None
     rate_limited_until: datetime | None = None
 

@@ -14,6 +14,7 @@ Endpoints implemented:
     POST /sessions                        -> exchange auth code for session_id
     GET  /sessions/{session_id}           -> account list and session status
     GET  /accounts/{account_id}/balances  -> balance objects for one account
+    GET  /accounts/{account_id}/transactions -> recent transactions for one account
 
 See https://enablebanking.com/docs/api/reference/ for the full surface.
 """
@@ -46,6 +47,9 @@ _BALANCE_TYPE_PREFERENCE: tuple[str, ...] = (
     "ITBD",  # interim booked
     "OPBD",  # opening booked
 )
+
+_TRANSACTION_LOOKBACK_DAYS = 90
+_MAX_TRANSACTION_PAGES = 10
 
 
 class EnableBankingClient:
@@ -198,7 +202,11 @@ class EnableBankingClient:
             "%Y-%m-%dT%H:%M:%S.000000+00:00"
         )
         payload: dict[str, Any] = {
-            "access": {"valid_until": valid_until},
+            "access": {
+                "valid_until": valid_until,
+                "balances": True,
+                "transactions": True,
+            },
             "aspsp": {"name": aspsp_name, "country": aspsp_country},
             "psu_type": psu_type,
             "state": secrets.token_urlsafe(16),
@@ -250,6 +258,44 @@ class EnableBankingClient:
         if not isinstance(balances, list):
             return []
         return balances
+
+    async def async_get_account_transactions(
+        self,
+        account_id: str,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent transactions for a single account."""
+        if date_to is None:
+            date_to = datetime.now(UTC).date().isoformat()
+        if date_from is None:
+            date_from = (
+                datetime.now(UTC).date() - timedelta(days=_TRANSACTION_LOOKBACK_DAYS)
+            ).isoformat()
+
+        transactions: list[dict[str, Any]] = []
+        continuation_key: str | None = None
+        for _ in range(_MAX_TRANSACTION_PAGES):
+            params = {"dateFrom": date_from, "dateTo": date_to}
+            if continuation_key:
+                params["continuationKey"] = continuation_key
+            data = await self._request(
+                "GET", f"/accounts/{account_id}/transactions", params=params
+            )
+            if not isinstance(data, dict):
+                raise EnableBankingAPIError(
+                    f"Unexpected transactions payload type: {type(data).__name__}"
+                )
+            page = data.get("transactions", [])
+            if isinstance(page, list):
+                transactions.extend(t for t in page if isinstance(t, dict))
+            continuation_key = data.get("continuationKey") or data.get(
+                "continuation_key"
+            )
+            if not isinstance(continuation_key, str) or not continuation_key:
+                break
+        return [_normalize_transaction(txn) for txn in transactions]
 
     async def async_get_all_balances(
         self,
@@ -314,6 +360,10 @@ class EnableBankingClient:
             name = _account_display_name(meta) or iban or uid[:8]
             product = meta.get("product") if isinstance(meta.get("product"), str) else None
 
+            previous_transactions = (
+                fallback[uid].transactions if fallback and uid in fallback else []
+            )
+
             try:
                 balances = await self.async_get_account_balances(uid)
             except EnableBankingSessionError:
@@ -349,7 +399,11 @@ class EnableBankingClient:
                 uid[:8],
                 iban or name,
                 len(balances),
-                [b.get("balance_type") for b in balances if isinstance(b, dict)],
+                [
+                    b.get("balance_type") or b.get("balanceType")
+                    for b in balances
+                    if isinstance(b, dict)
+                ],
             )
 
             picked = _pick_preferred_balance(balances)
@@ -362,7 +416,35 @@ class EnableBankingClient:
                 )
                 continue
 
-            amount_obj = picked.get("balance_amount") or picked.get("amount") or {}
+            try:
+                transactions = await self.async_get_account_transactions(uid)
+            except EnableBankingSessionError:
+                raise
+            except EnableBankingAuthenticationError:
+                raise
+            except EnableBankingConnectionError:
+                raise
+            except EnableBankingRateLimitError as err:
+                rate_limited.add(uid)
+                transactions = previous_transactions
+                _LOGGER.warning(
+                    "Rate limited fetching transactions for %s — keeping previous "
+                    "transaction list. Error: %s",
+                    name,
+                    err,
+                )
+            except EnableBankingAPIError as err:
+                transactions = previous_transactions
+                _LOGGER.warning(
+                    "Could not fetch transactions for %s (%s): %s", name, uid, err
+                )
+
+            amount_obj = (
+                picked.get("balance_amount")
+                or picked.get("balanceAmount")
+                or picked.get("amount")
+                or {}
+            )
             try:
                 amount = float(amount_obj.get("amount"))
             except (TypeError, ValueError):
@@ -378,8 +460,10 @@ class EnableBankingClient:
                 product=product,
                 currency=str(amount_obj.get("currency", "EUR")),
                 balance=amount,
-                balance_type=picked.get("balance_type"),
-                reference_date=picked.get("reference_date"),
+                balance_type=picked.get("balance_type") or picked.get("balanceType"),
+                reference_date=picked.get("reference_date")
+                or picked.get("referenceDate"),
+                transactions=transactions,
             )
 
         _LOGGER.debug(
@@ -410,7 +494,7 @@ def _collect_accounts(
         for item in accounts_data:
             if not isinstance(item, dict):
                 continue
-            uid = item.get("uid") or item.get("account_uid") or item.get("id")
+            uid = _account_uid(item)
             if isinstance(uid, str) and uid:
                 metadata[uid] = item
     elif isinstance(accounts_data, dict):
@@ -425,7 +509,7 @@ def _collect_accounts(
             if isinstance(item, str) and item:
                 uids.append(item)
             elif isinstance(item, dict):
-                uid = item.get("uid") or item.get("id")
+                uid = _account_uid(item)
                 if isinstance(uid, str) and uid:
                     uids.append(uid)
                     metadata.setdefault(uid, item)
@@ -434,6 +518,15 @@ def _collect_accounts(
     seen: set[str] = set()
     uids = [u for u in uids if not (u in seen or seen.add(u))]
     return uids, metadata
+
+
+def _account_uid(meta: dict[str, Any]) -> str:
+    """Return the account id used by Enable Banking per-account endpoints."""
+    for key in ("uid", "account_uid", "accountId", "account_id", "id"):
+        val = meta.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
 
 
 def _account_iban(meta: dict[str, Any]) -> str:
@@ -448,6 +541,21 @@ def _account_iban(meta: dict[str, Any]) -> str:
         val = meta.get(key)
         if isinstance(val, str) and val:
             return val
+    identifications = meta.get("identifications") or meta.get("account_identifications")
+    if isinstance(identifications, list):
+        for item in identifications:
+            if not isinstance(item, dict):
+                continue
+            scheme = item.get("schemeName") or item.get("scheme_name")
+            identification = item.get("identification")
+            if (
+                isinstance(scheme, str)
+                and scheme.upper() == "IBAN"
+                and isinstance(identification, str)
+                and identification
+            ):
+                return identification
+
     for container_key in (
         "account_id",
         "identification",
@@ -464,6 +572,15 @@ def _account_iban(meta: dict[str, Any]) -> str:
         elif isinstance(container, list):
             for item in container:
                 if isinstance(item, dict):
+                    scheme = item.get("schemeName") or item.get("scheme_name")
+                    identification = item.get("identification")
+                    if (
+                        isinstance(scheme, str)
+                        and scheme.upper() == "IBAN"
+                        and isinstance(identification, str)
+                        and identification
+                    ):
+                        return identification
                     for key in ("iban", "IBAN"):
                         val = item.get(key)
                         if isinstance(val, str) and val:
@@ -478,10 +595,13 @@ def _account_display_name(meta: dict[str, Any]) -> str:
         "displayName",
         "display_name",
         "account_name",
+        "holder",
         "ownerName",
         "owner_name",
+        "details",
         "product",
         "cash_account_type",
+        "cashAccountType",
     ):
         val = meta.get(key)
         if isinstance(val, str) and val:
@@ -499,7 +619,7 @@ def _pick_preferred_balance(
     for bal in balances:
         if not isinstance(bal, dict):
             continue
-        btype = bal.get("balance_type")
+        btype = bal.get("balance_type") or bal.get("balanceType")
         if isinstance(btype, str):
             by_type.setdefault(btype, bal)
     for preferred in _BALANCE_TYPE_PREFERENCE:
@@ -508,4 +628,76 @@ def _pick_preferred_balance(
     for bal in balances:
         if isinstance(bal, dict):
             return bal
+    return None
+
+
+def _normalize_transaction(txn: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact transaction dict suitable for a sensor attribute."""
+    amount_obj = txn.get("transactionAmount") or txn.get("transaction_amount") or {}
+    amount_raw = amount_obj.get("amount") if isinstance(amount_obj, dict) else None
+    try:
+        amount = float(amount_raw)
+    except (TypeError, ValueError):
+        amount = None
+
+    creditor = txn.get("creditor") if isinstance(txn.get("creditor"), dict) else {}
+    debtor = txn.get("debtor") if isinstance(txn.get("debtor"), dict) else {}
+    creditor_account_obj = txn.get("creditorAccount") or txn.get("creditor_account")
+    creditor_account = (
+        creditor_account_obj if isinstance(creditor_account_obj, dict) else {}
+    )
+    debtor_account_obj = txn.get("debtorAccount") or txn.get("debtor_account")
+    debtor_account = debtor_account_obj if isinstance(debtor_account_obj, dict) else {}
+    remittance = txn.get("remittanceInformation") or txn.get(
+        "remittance_information"
+    )
+    if isinstance(remittance, str):
+        remittance = [remittance]
+    elif not isinstance(remittance, list):
+        remittance = []
+
+    credit_debit = txn.get("creditDebitIndicator") or txn.get(
+        "credit_debit_indicator"
+    )
+    counterparty = _counterparty_name(str(credit_debit or ""), creditor, debtor)
+
+    out: dict[str, Any] = {
+        "amount": amount,
+        "currency": amount_obj.get("currency") if isinstance(amount_obj, dict) else None,
+        "credit_debit_indicator": credit_debit,
+        "status": txn.get("status"),
+        "entry_reference": txn.get("entryReference") or txn.get("entry_reference"),
+        "reference_number": txn.get("referenceNumber") or txn.get("reference_number"),
+        "booking_date": txn.get("bookingDate") or txn.get("booking_date"),
+        "transaction_date": txn.get("transactionDate") or txn.get("transaction_date"),
+        "value_date": txn.get("valueDate") or txn.get("value_date"),
+        "remittance_information": remittance,
+        "counterparty": counterparty,
+        "creditor_name": creditor.get("name") if isinstance(creditor, dict) else None,
+        "creditor_account": _account_identification(creditor_account),
+        "debtor_name": debtor.get("name") if isinstance(debtor, dict) else None,
+        "debtor_account": _account_identification(debtor_account),
+        "merchant_category_code": txn.get("merchantCategoryCode")
+        or txn.get("merchant_category_code"),
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [])}
+
+
+def _counterparty_name(
+    credit_debit: str, creditor: dict[str, Any], debtor: dict[str, Any]
+) -> str | None:
+    if credit_debit.upper() == "CRDT":
+        return debtor.get("name") or creditor.get("name")
+    if credit_debit.upper() == "DBIT":
+        return creditor.get("name") or debtor.get("name")
+    return creditor.get("name") or debtor.get("name")
+
+
+def _account_identification(account: dict[str, Any]) -> str | None:
+    identification = account.get("identification")
+    if isinstance(identification, str) and identification:
+        return identification
+    iban = account.get("iban") or account.get("IBAN")
+    if isinstance(iban, str) and iban:
+        return iban
     return None
