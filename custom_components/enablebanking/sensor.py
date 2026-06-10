@@ -18,7 +18,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.util.dt import utcnow
 
-from .const import CONF_ASPSP_NAME, DEFAULT_SCAN_INTERVAL
+from .const import CONF_ASPSP_NAME, STALE_THRESHOLD_HOURS
 from .coordinator import EnableBankingConfigEntry, EnableBankingCoordinator
 from .entity import EnableBankingEntity
 from .models import AccountBalance
@@ -155,7 +155,7 @@ class EnableBankingBalanceSensor(EnableBankingEntity, SensorEntity):
             account.last_polled_at.isoformat() if account.last_polled_at else None
         )
         attrs["last_error"] = self.coordinator.last_error
-        attrs["stale"] = _is_stale(account, self.coordinator.update_interval)
+        attrs["stale"] = _is_stale(account)
 
         data = self.coordinator.data
         if data is not None and data.consent_expires_at is not None:
@@ -167,11 +167,8 @@ class EnableBankingBalanceSensor(EnableBankingEntity, SensorEntity):
         return attrs
 
 
-def _is_stale(
-    account: AccountBalance, update_interval: timedelta | None
-) -> bool:
-    """True if the last successful poll for this account is older than 2× interval."""
+def _is_stale(account: AccountBalance) -> bool:
+    """True if the last successful poll is older than the stale threshold."""
     if account.last_polled_at is None:
         return True
-    interval = update_interval or timedelta(seconds=DEFAULT_SCAN_INTERVAL)
-    return (utcnow() - account.last_polled_at) > 2 * interval
+    return (utcnow() - account.last_polled_at) > timedelta(hours=STALE_THRESHOLD_HOURS)

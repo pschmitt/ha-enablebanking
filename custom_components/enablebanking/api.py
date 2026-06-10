@@ -77,6 +77,11 @@ class EnableBankingClient:
         self._jwt = new_jwt
 
     @property
+    def jwt(self) -> str:
+        """Return the active JWT."""
+        return self._jwt
+
+    @property
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self._jwt}",
@@ -146,7 +151,7 @@ class EnableBankingClient:
                     )
                 if response.status == 404:
                     raise EnableBankingSessionError(
-                        f"Session not found or expired: {text}"
+                        f"Session not found or expired: {text[:200]}"
                     )
                 if response.status == 429:
                     raise EnableBankingRateLimitError(
@@ -376,17 +381,19 @@ class EnableBankingClient:
                 rate_limited.add(uid)
                 if fallback and uid in fallback:
                     _LOGGER.warning(
-                        "Rate limited on %s — keeping previous balance "
+                        "Rate limited on %s (%s) — keeping previous balance "
                         "(PSD2 caps AIS polling at 4/day). Error: %s",
                         name,
+                        uid[:8],
                         err,
                     )
                     out[uid] = fallback[uid]
                 else:
                     _LOGGER.warning(
-                        "Rate limited on %s and no previous balance to fall "
+                        "Rate limited on %s (%s) and no previous balance to fall "
                         "back on. Error: %s",
                         name,
+                        uid[:8],
                         err,
                     )
                 continue
@@ -428,9 +435,10 @@ class EnableBankingClient:
                 rate_limited.add(uid)
                 transactions = previous_transactions
                 _LOGGER.warning(
-                    "Rate limited fetching transactions for %s — keeping previous "
+                    "Rate limited fetching transactions for %s (%s) — keeping previous "
                     "transaction list. Error: %s",
                     name,
+                    uid[:8],
                     err,
                 )
             except EnableBankingAPIError as err:
@@ -604,8 +612,8 @@ def _account_display_name(meta: dict[str, Any]) -> str:
         "cashAccountType",
     ):
         val = meta.get(key)
-        if isinstance(val, str) and val:
-            return val
+        if isinstance(val, str) and val.strip():
+            return val.strip()
     return ""
 
 

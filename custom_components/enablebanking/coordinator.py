@@ -29,6 +29,7 @@ Design notes (v0.5.0):
 from __future__ import annotations
 
 import logging
+import zlib
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -50,10 +51,9 @@ from .const import (
     CONSENT_WARNING_DAYS,
     DOMAIN,
     POLL_HOURS,
-    STALE_THRESHOLD_HOURS,
     STORAGE_VERSION,
 )
-from .jwt_helper import JWT_TTL_SECONDS, jwt_seconds_remaining, mint_jwt
+from .jwt_helper import jwt_seconds_remaining, mint_jwt
 from .errors import (
     EnableBankingAPIError,
     EnableBankingAuthenticationError,
@@ -86,6 +86,7 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=None,  # scheduled polling — we drive refresh ourselves
         )
@@ -98,9 +99,11 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.cache"
         )
         # Deterministic per-entry minute offset in [0, 59] so multiple
-        # banks don't all poll at xx:00:00. Hash of entry_id stays stable
-        # across HA restarts.
-        self._minute_offset: int = abs(hash(entry.entry_id)) % 60
+        # banks don't all poll at xx:00:00. crc32 (unlike hash(), which is
+        # PYTHONHASHSEED-randomized per process) stays stable across HA
+        # restarts, so needs_catchup() doesn't burn a spurious PSD2 poll
+        # after every restart.
+        self._minute_offset: int = zlib.crc32(entry.entry_id.encode()) % 60
 
     @property
     def minute_offset(self) -> int:
@@ -235,7 +238,7 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
         if not private_key or not app_id:
             return
 
-        remaining = jwt_seconds_remaining(self.client._jwt)
+        remaining = jwt_seconds_remaining(self.client.jwt)
         if remaining > 1800:  # more than 30 min left — nothing to do
             return
 
