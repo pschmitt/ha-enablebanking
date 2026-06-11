@@ -281,10 +281,11 @@ class EnableBankingClient:
 
         transactions: list[dict[str, Any]] = []
         continuation_key: str | None = None
+        seen_keys: set[str] = set()
         for _ in range(_MAX_TRANSACTION_PAGES):
-            params = {"dateFrom": date_from, "dateTo": date_to}
+            params = {"date_from": date_from, "date_to": date_to}
             if continuation_key:
-                params["continuationKey"] = continuation_key
+                params["continuation_key"] = continuation_key
             data = await self._request(
                 "GET", f"/accounts/{account_id}/transactions", params=params
             )
@@ -295,11 +296,16 @@ class EnableBankingClient:
             page = data.get("transactions", [])
             if isinstance(page, list):
                 transactions.extend(t for t in page if isinstance(t, dict))
-            continuation_key = data.get("continuationKey") or data.get(
-                "continuation_key"
+            continuation_key = data.get("continuation_key") or data.get(
+                "continuationKey"
             )
             if not isinstance(continuation_key, str) or not continuation_key:
                 break
+            # Guard against an unchanging continuation key (e.g. an API that
+            # ignores the parameter) re-fetching the same page until the cap.
+            if continuation_key in seen_keys:
+                break
+            seen_keys.add(continuation_key)
         return [_normalize_transaction(txn) for txn in transactions]
 
     async def async_get_all_balances(
