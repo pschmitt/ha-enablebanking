@@ -205,8 +205,7 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             iban_override = self.config_entry.options.get(CONF_IBAN_OVERRIDE, "").strip()
             if iban_override:
                 for ab in self._cached.values():
-                    if not ab.iban:
-                        ab.iban = iban_override
+                    ab.iban = iban_override
             self.async_set_updated_data(
                 EnableBankingData(
                     accounts=dict(self._cached),
@@ -323,7 +322,7 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             else:
                 ab.last_polled_at = now
                 ab.rate_limited_until = None
-            if iban_override and not ab.iban:
+            if iban_override:
                 ab.iban = iban_override
             self._cached[uid] = ab
 
