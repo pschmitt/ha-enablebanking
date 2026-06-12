@@ -453,6 +453,15 @@ class EnableBankingClient:
                     "Could not fetch transactions for %s (%s): %s", name, uid, err
                 )
 
+            if not iban:
+                iban = _extract_iban_from_transactions(transactions)
+                if iban:
+                    _LOGGER.debug(
+                        "Extracted IBAN %s for %s from transaction history",
+                        iban,
+                        uid[:8],
+                    )
+
             amount_obj = (
                 picked.get("balance_amount")
                 or picked.get("balanceAmount")
@@ -705,6 +714,44 @@ def _counterparty_name(
     if credit_debit.upper() == "DBIT":
         return creditor.get("name") or debtor.get("name")
     return creditor.get("name") or debtor.get("name")
+
+
+def _extract_iban_from_transactions(transactions: list[dict[str, Any]]) -> str:
+    """Attempt to derive the account's own IBAN from transaction indicators.
+
+    For DBIT (debit) transactions the local account is the debtor; for CRDT
+    (credit) transactions it is the creditor. We are only confident when both
+    sides independently converge on the same single IBAN.
+
+    Returns an empty string when the result is ambiguous or no account
+    identifiers are present in the transaction data.
+    """
+    dbit_set: set[str] = set()
+    crdt_set: set[str] = set()
+    for txn in transactions:
+        ind = txn.get("credit_debit_indicator", "")
+        if ind == "DBIT":
+            acct = txn.get("debtor_account")
+            if isinstance(acct, str) and acct:
+                dbit_set.add(acct)
+        elif ind == "CRDT":
+            acct = txn.get("creditor_account")
+            if isinstance(acct, str) and acct:
+                crdt_set.add(acct)
+
+    if dbit_set and crdt_set:
+        intersection = dbit_set & crdt_set
+        if len(intersection) == 1:
+            return next(iter(intersection))
+        return ""
+
+    if len(dbit_set) == 1:
+        return next(iter(dbit_set))
+
+    if len(crdt_set) == 1:
+        return next(iter(crdt_set))
+
+    return ""
 
 
 def _account_identification(account: dict[str, Any]) -> str | None:
