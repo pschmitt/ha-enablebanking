@@ -8,7 +8,8 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectSelector,
@@ -25,6 +26,7 @@ from .const import (
     CONF_ASPSP_NAME,
     CONF_AUTH_CODE,
     CONF_CONSENT_EXPIRES_AT,
+    CONF_IBAN_OVERRIDE,
     CONF_JWT,
     CONF_PRIVATE_KEY,
     CONF_PSU_TYPE,
@@ -44,10 +46,42 @@ from .errors import (
 _LOGGER = logging.getLogger(__name__)
 
 
+class EnableBankingOptionsFlow(OptionsFlow):
+    """Handle options for an existing Enable Banking entry."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        current_iban = self._config_entry.options.get(CONF_IBAN_OVERRIDE, "")
+        aspsp_name = self._config_entry.data.get(CONF_ASPSP_NAME, "this bank")
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_IBAN_OVERRIDE, default=current_iban): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                }
+            ),
+            description_placeholders={"aspsp_name": aspsp_name},
+        )
+
+
 class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Enable Banking."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> EnableBankingOptionsFlow:
+        return EnableBankingOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         self._jwt: str = ""

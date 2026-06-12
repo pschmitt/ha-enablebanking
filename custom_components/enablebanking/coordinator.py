@@ -46,6 +46,7 @@ from .const import (
     CONF_APP_ID,
     CONF_ASPSP_NAME,
     CONF_CONSENT_EXPIRES_AT,
+    CONF_IBAN_OVERRIDE,
     CONF_JWT,
     CONF_PRIVATE_KEY,
     CONSENT_WARNING_DAYS,
@@ -201,6 +202,11 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
                 len(self._cached),
                 self.config_entry.entry_id,
             )
+            iban_override = self.config_entry.options.get(CONF_IBAN_OVERRIDE, "").strip()
+            if iban_override:
+                for ab in self._cached.values():
+                    if not ab.iban:
+                        ab.iban = iban_override
             self.async_set_updated_data(
                 EnableBankingData(
                     accounts=dict(self._cached),
@@ -310,12 +316,15 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
         self.last_refresh = now
         back_off_until = now + _BACK_OFF
 
+        iban_override = self.config_entry.options.get(CONF_IBAN_OVERRIDE, "").strip()
         for uid, ab in fresh.items():
             if uid in rate_limited_uids:
                 ab.rate_limited_until = back_off_until
             else:
                 ab.last_polled_at = now
                 ab.rate_limited_until = None
+            if iban_override and not ab.iban:
+                ab.iban = iban_override
             self._cached[uid] = ab
 
         await self._save_cache()

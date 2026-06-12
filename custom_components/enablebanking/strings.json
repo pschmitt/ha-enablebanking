@@ -56,6 +56,17 @@
       "already_configured": "This bank session is already configured"
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Enable Banking options ({aspsp_name})",
+        "description": "Optionally override the IBAN for this account. Leave blank to use whatever the bank reports via the API.",
+        "data": {
+          "iban_override": "IBAN override"
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "balance": {

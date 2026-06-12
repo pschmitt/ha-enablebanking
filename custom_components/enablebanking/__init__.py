@@ -54,6 +54,9 @@ async def async_setup_entry(
     for unsub in coordinator.register_scheduled_polls():
         entry.async_on_unload(unsub)
 
+    # Reload the entry when options change (e.g. iban_override updated).
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+
     # Catch up if we missed a scheduled slot while HA was down.
     if coordinator.needs_catchup():
         delay = random.uniform(0, STARTUP_JITTER_SECONDS)
@@ -84,3 +87,9 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: EnableBankingConfigEntry
 ) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def _async_reload_entry(
+    hass: HomeAssistant, entry: EnableBankingConfigEntry
+) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
