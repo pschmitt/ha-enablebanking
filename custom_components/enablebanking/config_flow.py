@@ -7,11 +7,10 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
-from homeassistant.core import callback
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     TextSelector,
@@ -26,7 +25,6 @@ from .const import (
     CONF_ASPSP_NAME,
     CONF_AUTH_CODE,
     CONF_CONSENT_EXPIRES_AT,
-    CONF_IBAN_OVERRIDE,
     CONF_JWT,
     CONF_PRIVATE_KEY,
     CONF_PSU_TYPE,
@@ -35,53 +33,21 @@ from .const import (
     PSU_BUSINESS,
     PSU_PERSONAL,
 )
-from .jwt_helper import mint_jwt
 from .errors import (
     EnableBankingAPIError,
     EnableBankingAuthenticationError,
     EnableBankingConnectionError,
     EnableBankingSessionError,
 )
+from .jwt_helper import mint_jwt
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class EnableBankingOptionsFlow(OptionsFlow):
-    """Handle options for an existing Enable Banking entry."""
-
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self._config_entry = config_entry
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-
-        current_iban = self._config_entry.options.get(CONF_IBAN_OVERRIDE, "")
-        aspsp_name = self._config_entry.data.get(CONF_ASPSP_NAME, "this bank")
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_IBAN_OVERRIDE, default=current_iban): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.TEXT)
-                    ),
-                }
-            ),
-            description_placeholders={"aspsp_name": aspsp_name},
-        )
 
 
 class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Enable Banking."""
 
     VERSION = 1
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> EnableBankingOptionsFlow:
-        return EnableBankingOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         self._jwt: str = ""
@@ -97,9 +63,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     # Step 1: private key + app ID                                         #
     # ------------------------------------------------------------------ #
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Collect the private key and app ID, then validate by minting a JWT."""
         errors: dict[str, str] = {}
 
@@ -146,15 +110,13 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> str | None:
         try:
             return mint_jwt(private_key, app_id)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.debug("Could not mint JWT: %s", err)
             if errors is not None:
                 errors["base"] = "invalid_auth"
             return None
 
-    async def _try_load_aspsps(
-        self, jwt: str, errors: dict[str, str] | None = None
-    ) -> bool:
+    async def _try_load_aspsps(self, jwt: str, errors: dict[str, str] | None = None) -> bool:
         http = async_get_clientsession(self.hass)
         client = EnableBankingClient.for_config_flow(http, jwt)
         try:
@@ -167,7 +129,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
             if errors is not None:
                 errors["base"] = "cannot_connect"
             return False
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception("Unexpected error validating credentials")
             if errors is not None:
                 errors["base"] = "unknown"
@@ -175,7 +137,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
         return True
 
     def _credentials_from_existing_entries(
-        self, exclude_entry=None
+        self, exclude_entry: ConfigEntry | None = None
     ) -> tuple[str, str] | None:
         """Return (private_key, app_id) from any existing entry, newest first."""
         for entry in reversed(list(self._async_current_entries())):
@@ -215,9 +177,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     # Step 2b: ASPSP (filtered by country) + PSU type                      #
     # ------------------------------------------------------------------ #
 
-    async def async_step_aspsp(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_aspsp(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Pick a bank within the chosen country and its PSU type."""
         errors: dict[str, str] = {}
 
@@ -228,14 +188,12 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
             http = async_get_clientsession(self.hass)
             client = EnableBankingClient.for_config_flow(http, self._jwt)
             try:
-                auth_url = await client.async_start_auth(
-                    aspsp_name, self._aspsp_country, psu_type
-                )
+                auth_url = await client.async_start_auth(aspsp_name, self._aspsp_country, psu_type)
             except EnableBankingAuthenticationError:
                 errors["base"] = "invalid_auth"
             except EnableBankingConnectionError:
                 errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected error starting auth")
                 errors["base"] = "unknown"
             else:
@@ -244,9 +202,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._auth_url = auth_url
                 return await self.async_step_auth()
 
-        in_country = [
-            a for a in self._aspsps if a.get("country") == self._aspsp_country
-        ]
+        in_country = [a for a in self._aspsps if a.get("country") == self._aspsp_country]
         aspsp_options = _build_aspsp_options_for_country(in_country)
         psu_options = {PSU_PERSONAL: "Personal", PSU_BUSINESS: "Business"}
 
@@ -257,9 +213,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_ASPSP_NAME): SelectSelector(
                         SelectSelectorConfig(options=aspsp_options)
                     ),
-                    vol.Required(CONF_PSU_TYPE, default=PSU_PERSONAL): vol.In(
-                        psu_options
-                    ),
+                    vol.Required(CONF_PSU_TYPE, default=PSU_PERSONAL): vol.In(psu_options),
                 }
             ),
             description_placeholders={"country": _country_name(self._aspsp_country)},
@@ -270,9 +224,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     # Step 3: bank OAuth + auth code → session_id                          #
     # ------------------------------------------------------------------ #
 
-    async def async_step_auth(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_auth(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show the bank's auth URL and collect the returned auth code."""
         errors: dict[str, str] = {}
 
@@ -286,7 +238,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth_code"
             except EnableBankingConnectionError:
                 errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected error creating session")
                 errors["base"] = "unknown"
             else:
@@ -299,13 +251,9 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _async_finish_session(
-        self, session_data: dict[str, Any]
-    ) -> ConfigFlowResult:
+    async def _async_finish_session(self, session_data: dict[str, Any]) -> ConfigFlowResult:
         session_id = session_data.get("session_id") or session_data.get("uid", "")
-        consent_expires_at: str | None = (session_data.get("access") or {}).get(
-            "valid_until"
-        )
+        consent_expires_at: str | None = (session_data.get("access") or {}).get("valid_until")
 
         # Sanity-check the new session before saving.
         http = async_get_clientsession(self.hass)
@@ -365,8 +313,8 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Re-authenticate using the private key.
 
-        Fast-path: mint a JWT and validate it against the existing session —
-        if the session is still alive this finishes in one click with no bank
+        Fast-path: mint a JWT and validate it against the existing session.
+        If the session is still alive this finishes in one click with no bank
         round-trip. Slow-path: session is dead, do full bank reauth.
         """
         errors: dict[str, str] = {}
@@ -387,7 +335,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "invalid_auth"
                 except EnableBankingConnectionError:
                     errors["base"] = "cannot_connect"
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("Unexpected error validating credentials during reauth")
                     errors["base"] = "unknown"
 
@@ -402,7 +350,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                         pass  # session dead or different app — fall through
                     except EnableBankingConnectionError:
                         errors["base"] = "cannot_connect"
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         _LOGGER.exception("Unexpected error during smart reauth")
                         errors["base"] = "unknown"
                     else:
@@ -432,7 +380,7 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                 except EnableBankingConnectionError:
                     errors["base"] = "cannot_connect"
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("Unexpected error starting reauth")
                     errors["base"] = "unknown"
                 else:
@@ -481,13 +429,11 @@ class EnableBankingConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth_code"
             except EnableBankingConnectionError:
                 errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected error creating session during reauth")
                 errors["base"] = "unknown"
             else:
-                session_id = session_data.get("session_id") or session_data.get(
-                    "uid", ""
-                )
+                session_id = session_data.get("session_id") or session_data.get("uid", "")
                 consent_expires_at: str | None = (session_data.get("access") or {}).get(
                     "valid_until"
                 )
@@ -560,25 +506,25 @@ def _country_name(code: str) -> str:
 
 def _build_country_options(
     aspsps: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[SelectOptionDict]:
     """One option per country present in the ASPSP list, sorted by display name."""
     countries = {a["country"] for a in aspsps if a.get("country")}
     return [
-        {"value": code, "label": f"{_country_name(code)} ({code})"}
+        SelectOptionDict(value=code, label=f"{_country_name(code)} ({code})")
         for code in sorted(countries, key=lambda c: _country_name(c).lower())
     ]
 
 
 def _build_aspsp_options_for_country(
     aspsps: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[SelectOptionDict]:
     """Bank options for a single country, alphabetical, dedup on name."""
     seen: set[str] = set()
-    options: list[dict[str, str]] = []
+    options: list[SelectOptionDict] = []
     for aspsp in sorted(aspsps, key=lambda a: a.get("name", "").lower()):
         name = aspsp.get("name", "")
         if not name or name in seen:
             continue
         seen.add(name)
-        options.append({"value": name, "label": name})
+        options.append(SelectOptionDict(value=name, label=name))
     return options

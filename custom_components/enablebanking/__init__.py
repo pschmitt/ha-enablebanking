@@ -7,22 +7,44 @@ import random
 from datetime import datetime
 
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later
 
 from .api import EnableBankingClient
-from .const import CONF_JWT, CONF_SESSION_ID, STARTUP_JITTER_SECONDS
+from .const import CONF_JWT, CONF_SESSION_ID, DOMAIN, STARTUP_JITTER_SECONDS
 from .coordinator import EnableBankingConfigEntry, EnableBankingCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.EVENT, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+SERVICE_REFRESH = "refresh"
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: EnableBankingConfigEntry
-) -> bool:
+def _register_services(hass: HomeAssistant) -> None:
+    """Register the domain-wide ``enablebanking.refresh`` service once.
+
+    Forces an immediate balance poll for every configured entry — handy for
+    debugging (you don't need an existing sensor to trigger it) and still
+    subject to the bank's PSD2 rate limit.
+    """
+    if hass.services.has_service(DOMAIN, SERVICE_REFRESH):
+        return
+
+    async def _handle_refresh(_call: ServiceCall) -> None:
+        entries: list[EnableBankingConfigEntry] = hass.config_entries.async_entries(DOMAIN)
+        for entry in entries:
+            coordinator = getattr(entry, "runtime_data", None)
+            if coordinator is None:
+                continue
+            _LOGGER.debug("enablebanking.refresh: forcing poll for entry %s", entry.entry_id)
+            await coordinator.async_refresh()
+
+    hass.services.async_register(DOMAIN, SERVICE_REFRESH, _handle_refresh)
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: EnableBankingConfigEntry) -> bool:
     """Set up Enable Banking from a config entry.
 
     Startup flow:
@@ -33,7 +55,7 @@ async def async_setup_entry(
     4. Register scheduled polls at POLL_HOURS (10/14/18/22 local) with
        per-entry minute jitter.
     5. If the cache is older than the most recent scheduled slot that has
-       already passed, trigger one catch-up refresh (with 0–60 s jitter to
+       already passed, trigger one catch-up refresh (with 0-60 s jitter to
        stagger multiple entries). Otherwise do nothing — the next scheduled
        poll handles it.
     """
@@ -48,21 +70,19 @@ async def async_setup_entry(
     await coordinator.async_load_cache()
     entry.runtime_data = coordinator
 
+    _register_services(hass)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register the four daily scheduled polls.
     for unsub in coordinator.register_scheduled_polls():
         entry.async_on_unload(unsub)
 
-    # Reload the entry when options change (e.g. iban_override updated).
-    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
-
     # Catch up if we missed a scheduled slot while HA was down.
     if coordinator.needs_catchup():
         delay = random.uniform(0, STARTUP_JITTER_SECONDS)
         _LOGGER.debug(
-            "Catch-up refresh for entry %s scheduled in %.0f s "
-            "(last_refresh=%s)",
+            "Catch-up refresh for entry %s scheduled in %.0f s (last_refresh=%s)",
             entry.entry_id,
             delay,
             coordinator.last_refresh,
@@ -74,8 +94,7 @@ async def async_setup_entry(
         entry.async_on_unload(async_call_later(hass, delay, _catchup))
     else:
         _LOGGER.debug(
-            "Cache for entry %s is fresh (last_refresh=%s); "
-            "waiting for next scheduled slot",
+            "Cache for entry %s is fresh (last_refresh=%s); waiting for next scheduled slot",
             entry.entry_id,
             coordinator.last_refresh,
         )
@@ -83,13 +102,5 @@ async def async_setup_entry(
     return True
 
 
-async def async_unload_entry(
-    hass: HomeAssistant, entry: EnableBankingConfigEntry
-) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: EnableBankingConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-
-async def _async_reload_entry(
-    hass: HomeAssistant, entry: EnableBankingConfigEntry
-) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
