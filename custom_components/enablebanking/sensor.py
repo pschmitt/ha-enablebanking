@@ -14,7 +14,6 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import CURRENCY_EURO
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -41,7 +40,9 @@ class EnableBankingSensorDescription(SensorEntityDescription):
 BALANCE_SENSOR = EnableBankingSensorDescription(
     key="balance",
     translation_key="balance",
-    native_unit_of_measurement=CURRENCY_EURO,
+    # ISO 4217 code, not CURRENCY_EURO ("€"): groups and statistics of
+    # several balance sensors expect the code.
+    native_unit_of_measurement="EUR",
     device_class=SensorDeviceClass.MONETARY,
     state_class=SensorStateClass.TOTAL,
     suggested_display_precision=2,

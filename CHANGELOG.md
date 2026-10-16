@@ -3,6 +3,12 @@
 Releases up to and including 0.6.11 are described in the
 [GitHub release notes](https://github.com/SurfHost/ha-enablebanking/releases).
 
+## [0.7.1] - 2026-10-16
+
+### Fixed
+- **Every HA restart could burn a PSD2 poll.** The per-entry poll minute came from Python's `hash()`, which is randomized per process, so after a restart the schedule moved and the startup check often saw a "missed" slot and polled again. It now uses `crc32` of the entry id, which never changes.
+- **The balance unit is `EUR` again, not `€`.** `CURRENCY_EURO` renders as the symbol, which no longer matched the unit long-term statistics were recorded in and raised a "unit changed" repair for every balance sensor.
+
 ## [0.7.0] - 2026-10-16
 
 ### Added

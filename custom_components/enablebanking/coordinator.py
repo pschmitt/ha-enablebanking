@@ -33,6 +33,7 @@ Design notes (v0.5.0):
 from __future__ import annotations
 
 import logging
+import zlib
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -107,9 +108,11 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.cache"
         )
         # Deterministic per-entry minute offset in [0, 59] so multiple
-        # banks don't all poll at xx:00:00. Hash of entry_id stays stable
-        # across HA restarts.
-        self._minute_offset: int = abs(hash(entry.entry_id)) % 60
+        # banks don't all poll at xx:00:00. crc32, not hash(): hash() is
+        # PYTHONHASHSEED-randomized per process, so the offset would move on
+        # every restart and needs_catchup() would see a "missed" slot and
+        # burn a PSD2 poll.
+        self._minute_offset: int = zlib.crc32(entry.entry_id.encode()) % 60
 
     @property
     def minute_offset(self) -> int:
