@@ -14,6 +14,8 @@ Endpoints implemented:
     POST /sessions                        -> exchange auth code for session_id
     GET  /sessions/{session_id}           -> account list and session status
     GET  /accounts/{account_id}/balances  -> balance objects for one account
+    GET  /accounts/{account_id}/details   -> IBAN / name / product for one account
+    GET  /accounts/{account_id}/transactions -> recent transactions for one account
 
 See https://enablebanking.com/docs/api/reference/ for the full surface.
 """
@@ -47,6 +49,12 @@ _BALANCE_TYPE_PREFERENCE: tuple[str, ...] = (
     "ITBD",  # interim booked
     "OPBD",  # opening booked
 )
+
+# How far back to ask for transactions, how many continuation pages to follow
+# at most, and how many (newest first) to keep on the sensor attribute.
+_TRANSACTION_LOOKBACK_DAYS = 90
+_MAX_TRANSACTION_PAGES = 10
+_MAX_STORED_TRANSACTIONS = 50
 
 
 class EnableBankingClient:
@@ -202,7 +210,11 @@ class EnableBankingClient:
             "%Y-%m-%dT%H:%M:%S.000000+00:00"
         )
         payload: dict[str, Any] = {
-            "access": {"valid_until": valid_until},
+            "access": {
+                "valid_until": valid_until,
+                "balances": True,
+                "transactions": True,
+            },
             "aspsp": {"name": aspsp_name, "country": aspsp_country},
             "psu_type": psu_type,
             "state": secrets.token_urlsafe(16),
@@ -263,6 +275,39 @@ class EnableBankingClient:
             return []
         return balances
 
+    async def async_get_account_transactions(self, account_id: str) -> list[dict[str, Any]]:
+        """Return the recent transactions of one account, normalised, newest first.
+
+        Follows ``continuation_key`` pages (bounded by ``_MAX_TRANSACTION_PAGES``
+        and guarded against a key that never changes) and keeps the newest
+        ``_MAX_STORED_TRANSACTIONS``.
+        """
+        today = datetime.now(UTC).date()
+        params: dict[str, str] = {
+            "date_from": (today - timedelta(days=_TRANSACTION_LOOKBACK_DAYS)).isoformat(),
+            "date_to": today.isoformat(),
+        }
+        raw: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for _ in range(_MAX_TRANSACTION_PAGES):
+            data = await self._request("GET", f"/accounts/{account_id}/transactions", params=params)
+            if not isinstance(data, dict):
+                raise EnableBankingAPIError(
+                    f"Unexpected transactions payload type: {type(data).__name__}"
+                )
+            page = data.get("transactions", [])
+            if isinstance(page, list):
+                raw.extend(t for t in page if isinstance(t, dict))
+            key = data.get("continuation_key")
+            if not isinstance(key, str) or not key or key in seen_keys:
+                break
+            seen_keys.add(key)
+            params["continuation_key"] = key
+
+        transactions = [_normalize_transaction(t) for t in raw]
+        transactions.sort(key=_transaction_sort_date, reverse=True)
+        return transactions[:_MAX_STORED_TRANSACTIONS]
+
     async def async_get_account_details(self, account_id: str) -> dict[str, Any]:
         """Return the account-details object for a single account.
 
@@ -286,8 +331,9 @@ class EnableBankingClient:
         skip_ids: set[str] | None = None,
         fetch_details: bool = True,
         legacy_by_uid: dict[str, AccountBalance] | None = None,
-    ) -> tuple[dict[str, AccountBalance], set[str]]:
-        """Return (accounts, rate_limited_ids) for the current session.
+        skip_transaction_ids: set[str] | None = None,
+    ) -> tuple[dict[str, AccountBalance], set[str], set[str]]:
+        """Return (accounts, rate_limited_ids, transactions_rate_limited_ids).
 
         Accounts are keyed by ``stable_id`` (Enable Banking's
         ``identification_hash``), not the session ``uid`` > the uid changes on
@@ -299,6 +345,11 @@ class EnableBankingClient:
         dropping the sensor. The returned ``rate_limited_ids`` set tells
         the coordinator which accounts need a back-off flag set on their
         cached entry.
+
+        Transactions are fetched after a successful balance, with their own
+        back-off (``skip_transaction_ids`` / the third returned set): a 429 or
+        API error there keeps the previous transaction list and never drops
+        or delays the balance.
 
         Session payload shape (observed for N26 and similar ASPSPs):
             {
@@ -338,10 +389,11 @@ class EnableBankingClient:
                 session.get("status"),
                 sorted(session.keys()),
             )
-            return {}, set()
+            return {}, set(), set()
 
         out: dict[str, AccountBalance] = {}
         rate_limited: set[str] = set()
+        transactions_rate_limited: set[str] = set()
         for uid in uids:
             meta = metadata.get(uid, {})
             stable_id = _account_stable_id(meta, uid)
@@ -468,6 +520,25 @@ class EnableBankingClient:
                 _LOGGER.warning("Could not parse amount for %s; picked=%r", uid, picked)
                 continue
 
+            transactions = prev.transactions if prev else []
+            if skip_transaction_ids and stable_id in skip_transaction_ids:
+                _LOGGER.debug("Skipping transactions for %s: back-off active", uid[:8])
+            else:
+                try:
+                    transactions = await self.async_get_account_transactions(uid)
+                except (EnableBankingSessionError, EnableBankingAuthenticationError):
+                    raise
+                except EnableBankingRateLimitError as err:
+                    transactions_rate_limited.add(stable_id)
+                    _LOGGER.warning(
+                        "Rate limited fetching transactions for %s, keeping the "
+                        "previous list. Error: %s",
+                        name,
+                        err,
+                    )
+                except (EnableBankingConnectionError, EnableBankingAPIError) as err:
+                    _LOGGER.warning("Could not fetch transactions for %s: %s", name, err)
+
             out[stable_id] = AccountBalance(
                 account_id=uid,
                 stable_id=stable_id,
@@ -478,14 +549,20 @@ class EnableBankingClient:
                 balance=amount,
                 balance_type=picked.get("balance_type"),
                 reference_date=picked.get("reference_date"),
+                transactions=transactions,
+                transactions_rate_limited_until=(
+                    prev.transactions_rate_limited_until if prev else None
+                ),
             )
 
         _LOGGER.debug(
-            "async_get_all_balances produced %d account balance(s); %d rate-limited",
+            "async_get_all_balances produced %d account balance(s); %d rate-limited, "
+            "%d transactions rate-limited",
             len(out),
             len(rate_limited),
+            len(transactions_rate_limited),
         )
-        return out, rate_limited
+        return out, rate_limited, transactions_rate_limited
 
 
 def _collect_accounts(
@@ -631,4 +708,76 @@ def _pick_preferred_balance(
     for bal in balances:
         if isinstance(bal, dict):
             return bal
+    return None
+
+
+def _normalize_transaction(txn: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact transaction dict suitable for a sensor attribute."""
+    amount_raw = txn.get("transaction_amount")
+    amount_obj: dict[str, Any] = amount_raw if isinstance(amount_raw, dict) else {}
+    try:
+        amount: float | None = float(amount_obj["amount"])
+    except (KeyError, TypeError, ValueError):
+        amount = None
+
+    creditor = _as_dict(txn.get("creditor"))
+    debtor = _as_dict(txn.get("debtor"))
+    remittance = txn.get("remittance_information")
+    if isinstance(remittance, str):
+        remittance = [remittance]
+    elif not isinstance(remittance, list):
+        remittance = []
+
+    credit_debit = txn.get("credit_debit_indicator")
+    out: dict[str, Any] = {
+        "amount": amount,
+        "currency": amount_obj.get("currency"),
+        "credit_debit_indicator": credit_debit,
+        "status": txn.get("status"),
+        "entry_reference": txn.get("entry_reference"),
+        "reference_number": txn.get("reference_number"),
+        "booking_date": txn.get("booking_date"),
+        "transaction_date": txn.get("transaction_date"),
+        "value_date": txn.get("value_date"),
+        "remittance_information": remittance,
+        "counterparty": _counterparty_name(str(credit_debit or ""), creditor, debtor),
+        "creditor_name": creditor.get("name"),
+        "creditor_account": _account_identification(_as_dict(txn.get("creditor_account"))),
+        "debtor_name": debtor.get("name"),
+        "debtor_account": _account_identification(_as_dict(txn.get("debtor_account"))),
+        "merchant_category_code": txn.get("merchant_category_code"),
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [])}
+
+
+def _transaction_sort_date(txn: dict[str, Any]) -> str:
+    for key in ("booking_date", "value_date", "transaction_date"):
+        val = txn.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _counterparty_name(
+    credit_debit: str, creditor: dict[str, Any], debtor: dict[str, Any]
+) -> str | None:
+    """The other party: the debtor of a credit, the creditor of a debit."""
+    first, second = (debtor, creditor) if credit_debit.upper() == "CRDT" else (creditor, debtor)
+    name = first.get("name") or second.get("name")
+    return name if isinstance(name, str) else None
+
+
+def _account_identification(account: dict[str, Any]) -> str | None:
+    iban = account.get("iban")
+    if isinstance(iban, str) and iban:
+        return iban
+    other = account.get("other")
+    if isinstance(other, dict):
+        identification = other.get("identification")
+        if isinstance(identification, str) and identification:
+            return identification
     return None

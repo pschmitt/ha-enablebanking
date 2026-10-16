@@ -89,6 +89,11 @@
       "balance": {
         "name": "Saldo"
       }
+    },
+    "event": {
+      "last_transaction": {
+        "name": "Laatste transactie"
+      }
     }
   }
 }

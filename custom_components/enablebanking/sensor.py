@@ -54,6 +54,7 @@ BALANCE_SENSOR = EnableBankingSensorDescription(
         "currency": acc.currency,
         "balance_type": acc.balance_type,
         "reference_date": acc.reference_date,
+        "transactions": acc.transactions,
     },
 )
 
@@ -195,6 +196,9 @@ class EnableBankingBalanceSensor(EnableBankingEntity, SensorEntity):
 
     entity_description: EnableBankingSensorDescription
     coordinator: EnableBankingCoordinator
+    # The transaction list is large and changes on every poll; keep it out of
+    # the recorder (it is only there for dashboards to read live).
+    _unrecorded_attributes = frozenset({"transactions"})
 
     def __init__(
         self,

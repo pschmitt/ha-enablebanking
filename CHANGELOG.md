@@ -3,6 +3,13 @@
 Releases up to and including 0.6.11 are described in the
 [GitHub release notes](https://github.com/SurfHost/ha-enablebanking/releases).
 
+## [0.7.0] - 2026-10-16
+
+### Added
+- **Recent transactions are back as a sensor attribute.** Each balance sensor carries a `transactions` attribute again: up to 50 transactions from the last 90 days, newest first, fetched on the same four scheduled polls as the balance. It is kept out of the recorder and cached on disk with the balance, so it survives restarts without an extra API call.
+- **The last-transaction event entity is back.** One `event.<bank>_last_transaction` per bank entry fires a `transaction` event for each transaction not seen on the previous poll. It reuses the old unique id, so entities from before 0.6.10 come back under their old entity ids.
+- **Transactions back off separately from the balance.** A 429 or API error on `/transactions` keeps the previous list and skips only the next transaction fetch for that account. The balance poll is never dropped or delayed because of it.
+
 ## [0.6.13] - 2026-10-11
 
 ### Fixed

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -23,6 +24,10 @@ class AccountBalance:
     use for entity identity and the cache. ``account_id`` is the session-scoped
     ``uid`` which Enable Banking regenerates on every reauth; it is only used
     to call ``GET /accounts/{uid}/balances`` and to migrate old entity ids.
+
+    ``transactions`` holds the most recent normalised transactions, newest
+    first. ``transactions_rate_limited_until`` is a back-off separate from
+    the balance one: a 429 on ``/transactions`` must not cost us the balance.
     """
 
     account_id: str
@@ -36,6 +41,8 @@ class AccountBalance:
     reference_date: str | None
     last_polled_at: datetime | None = None
     rate_limited_until: datetime | None = None
+    transactions: list[dict[str, Any]] = field(default_factory=list)
+    transactions_rate_limited_until: datetime | None = None
 
 
 @dataclass(slots=True)

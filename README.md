@@ -15,7 +15,7 @@ The integration uses **Enable Banking** as the licensed TPP (Third Party Provide
 - Balance sensor per discovered account under each entry
 - Revolut Business supported: select ASPSP "Revolut" with account type "Business"
 - EUR (and other currencies) with `state_class: total`, `device_class: monetary`
-- Attributes per sensor: IBAN, account name, product, currency, balance type, reference date, bank name, `last_polled_at`, `last_error`, `stale`, `consent_expires_at`, `consent_days_remaining`
+- Attributes per sensor: IBAN, account name, product, currency, balance type, reference date, recent transactions, bank name, `last_polled_at`, `last_error`, `stale`, `consent_expires_at`, `consent_days_remaining`
 - Scheduled polling at fixed local times (10:00, 14:00, 18:00, 22:00) with per-entry minute jitter > exactly four polls/day, aligned with PSD2's cap
 - **Never-unavailable sensors**: balances are cached to disk and displayed even during rate-limits, network blips, consent expiry, or the first moment after an HA restart before the first poll runs
 - Graceful 180-day consent expiry: proactive 14-day warning, renew early with **Reconfigure**, automatic reauth UI when the consent lapses
@@ -103,12 +103,29 @@ Select ASPSP **Revolut** and account type **Business**. Enable Banking uses a si
 | `currency` | ISO currency code |
 | `balance_type` | Balance type code (CLBD, ITAV, …) |
 | `reference_date` | Date of the reported balance |
+| `transactions` | Up to 50 most recent transactions from the last 90 days, newest first. Each has `amount`, `currency`, `credit_debit_indicator` (`CRDT`/`DBIT`), `booking_date`, `value_date`, `counterparty`, `remittance_information` and, when the bank supplies them, creditor/debtor names and accounts. Not stored in the recorder. |
 | `aspsp` | Bank name (useful for templates across multiple entries) |
 | `last_polled_at` | ISO timestamp of the last successful fetch for this account |
 | `last_error` | Short tag if the most recent poll attempt failed: `rate_limited`, `network`, `consent_expired`, `auth`, `api`. Empty string on success. |
 | `stale` | Boolean, true when `last_polled_at` is older than 16 h (twice the 8 h nominal interval; the schedule itself is fixed, see below) |
 | `consent_expires_at` | ISO timestamp when the PSD2 consent expires |
 | `consent_days_remaining` | Integer days until expiry |
+
+**Last-transaction event**
+
+Each bank entry also gets one `event.<bank>_last_transaction` entity. It fires a `transaction` event for every transaction that was not there on the previous poll, oldest first, with the transaction fields from the table above plus `iban` and `account_name` as event attributes. The first update after a restart only records what is already cached, so restarts never replay old transactions.
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: event.lcl_last_transaction
+actions:
+  - action: notify.notify
+    data:
+      message: >
+        {{ trigger.to_state.attributes.counterparty | default('?') }}:
+        {{ trigger.to_state.attributes.amount }} {{ trigger.to_state.attributes.currency }}
+```
 
 ## Polling schedule
 

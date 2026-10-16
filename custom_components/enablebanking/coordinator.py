@@ -24,6 +24,10 @@ Design notes (v0.5.0):
 - **Per-account 429 back-off**: a rate-limited UID gets
   ``rate_limited_until = now + 4 hours`` stamped on its cached entry. The
   next scheduled poll skips it; the one after resumes.
+
+- **Transactions** are fetched with the balance on each poll but back off
+  on their own (``transactions_rate_limited_until``): a 429 on
+  ``/transactions`` keeps the previous list and leaves the balance alone.
 """
 
 from __future__ import annotations
@@ -290,11 +294,23 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
                 sorted(s[:8] for s in skip_ids),
             )
 
+        skip_transaction_ids = {
+            stable_id
+            for stable_id, ab in self._cached.items()
+            if ab.transactions_rate_limited_until is not None
+            and ab.transactions_rate_limited_until > now
+        }
+
         try:
-            fresh, rate_limited_ids = await self.client.async_get_all_balances(
+            (
+                fresh,
+                rate_limited_ids,
+                transactions_rate_limited_ids,
+            ) = await self.client.async_get_all_balances(
                 fallback=self._cached,
                 skip_ids=skip_ids,
                 legacy_by_uid=self._legacy_by_uid or None,
+                skip_transaction_ids=skip_transaction_ids,
             )
         except EnableBankingAuthenticationError as err:
             self.last_error = "auth"
@@ -329,6 +345,10 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             else:
                 ab.last_polled_at = now
                 ab.rate_limited_until = None
+            if stable_id in transactions_rate_limited_ids:
+                ab.transactions_rate_limited_until = back_off_until
+            elif stable_id not in skip_transaction_ids:
+                ab.transactions_rate_limited_until = None
             self._cached[stable_id] = ab
 
         # Drop legacy (pre-0.6.5) entries we've now adopted into the stable
@@ -417,6 +437,8 @@ def _balance_from_stored(data: dict[str, Any]) -> AccountBalance | None:
             else None,
             last_polled_at=_parse_iso(data.get("last_polled_at")),
             rate_limited_until=_parse_iso(data.get("rate_limited_until")),
+            transactions=[t for t in _as_list(data.get("transactions")) if isinstance(t, dict)],
+            transactions_rate_limited_until=_parse_iso(data.get("transactions_rate_limited_until")),
         )
     except (KeyError, TypeError, ValueError):
         _LOGGER.debug("Skipping malformed cached entry: %r", data)
@@ -436,6 +458,10 @@ def _balance_to_stored(ab: AccountBalance) -> dict[str, Any]:
         "reference_date": ab.reference_date,
         "last_polled_at": ab.last_polled_at.isoformat() if ab.last_polled_at else None,
         "rate_limited_until": ab.rate_limited_until.isoformat() if ab.rate_limited_until else None,
+        "transactions": ab.transactions,
+        "transactions_rate_limited_until": ab.transactions_rate_limited_until.isoformat()
+        if ab.transactions_rate_limited_until
+        else None,
     }
 
 
@@ -446,3 +472,7 @@ def _parse_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(value)
     except (ValueError, TypeError):
         return None
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []

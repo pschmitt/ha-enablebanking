@@ -89,6 +89,11 @@
       "balance": {
         "name": "Balance"
       }
+    },
+    "event": {
+      "last_transaction": {
+        "name": "Last transaction"
+      }
     }
   }
 }
